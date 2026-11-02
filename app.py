@@ -15,6 +15,7 @@ from foundation import (
     parse_e2k, read_reactions, summary_table, zone_loads,
 )
 from foundation_demo import demo_e2k, demo_reactions_xlsx
+from foundation_schedule import merge_schedule, read_schedule_file, template_xlsx
 from foundation_draw import (
     build_dxf, build_pdf, differs, dwg_to_dxf, dxf_segments, grid_extent, pdf_page_images, plotly_plan,
 )
@@ -69,6 +70,19 @@ def _read_rx(name: str, data: bytes):
 
 
 @st.cache_data(show_spinner=False)
+def _read_sched(name: str, data: bytes):
+    return read_schedule_file(name, data)
+
+
+def apply_schedule(df: pd.DataFrame, replace: bool):
+    """Button callback: put the imported footing schedule into the editor."""
+    current = ss.get("fd_footings_live", ss.fd_footings)
+    ss.fd_footings_live = merge_schedule(current, df, replace)
+    ss.fd_sched_applied = ss.fd_sched[0]
+    bump()
+
+
+@st.cache_data(show_spinner=False)
 def _pdf_pages(data: bytes):
     return pdf_page_images(data, zoom=1.6)
 
@@ -96,12 +110,15 @@ with st.sidebar:
     st.download_button("ตัวอย่าง .e2k", demo_e2k().encode(), "B6_demo.e2k", width="stretch")
     st.download_button("ตัวอย่าง Joint Reactions .xlsx", demo_reactions_xlsx(), "B6_demo_Joint_Reactions.xlsx",
                        width="stretch")
+    st.download_button("แบบฟอร์มตารางฐานราก .xlsx", template_xlsx(ss.get("fd_footings_live", ss.fd_footings)),
+                       "Footing_Schedule.xlsx", width="stretch",
+                       help="ตารางเบอร์ฐานรากปัจจุบัน — แก้ใน Excel แล้วแนบกลับในช่องที่ 4")
 
 # --------------------------------------------------------------------------
 # 1) Uploads
 # --------------------------------------------------------------------------
 st.subheader("① แนบไฟล์")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     up = st.file_uploader("1. แบบแปลน (PDF / DXF / DWG) — ใช้ดูตำแหน่งฐานราก", type=["pdf", "dxf", "dwg"],
                           key=f"fd_up_plan_{ss.fd_ver}")
@@ -123,6 +140,14 @@ with c3:
         ss.fd_rx = (up.name, up.getvalue())
     if ss.get("fd_rx"):
         st.success(f"Load: {ss.fd_rx[0]}")
+with c4:
+    up = st.file_uploader("4. ข้อมูลฐานราก (Excel / PDF / รูป) — เบอร์, จำนวนเข็ม, ขนาดเข็ม, Capacity, B×L×H",
+                          type=["xlsx", "xls", "csv", "pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+                          key=f"fd_up_sched_{ss.fd_ver}")
+    if up is not None and (ss.get("fd_sched") or ("",))[0] != up.name + str(up.size):
+        ss.fd_sched = (up.name + str(up.size), up.name, up.getvalue())
+    if ss.get("fd_sched"):
+        st.success(f"ฐานราก: {ss.fd_sched[1]}")
 
 if not ss.get("fd_e2k") or not ss.get("fd_rx"):
     st.info("แนบไฟล์ .e2k และ Excel Joint Reactions (หรือกด **โหลดข้อมูลตัวอย่าง** ที่แถบซ้าย) เพื่อเริ่มต้น\n\n"
@@ -192,6 +217,29 @@ if missing:
 # 3) Footing schedule + FMAT zones
 # --------------------------------------------------------------------------
 st.subheader("③ ตารางฐานราก และขอบเขต FMAT")
+sched_imgs, imp = [], None
+if ss.get("fd_sched"):
+    key_, sname, sdata = ss.fd_sched
+    with st.spinner(f"กำลังอ่าน {sname} ..."):
+        try:
+            imp, imp_notes, sched_imgs = _read_sched(sname, sdata)
+        except Exception as e:  # noqa: BLE001
+            imp, imp_notes, sched_imgs = None, [f"อ่านไฟล์ไม่ได้: {e}"], []
+    applied = ss.get("fd_sched_applied") == key_
+    with st.expander(f"📥 ข้อมูลฐานรากจากไฟล์: {sname}" + (" — ใช้แล้ว ✓" if applied else ""), expanded=not applied):
+        for n in imp_notes:
+            st.caption(f"• {n}")
+        if imp is not None:
+            st.dataframe(imp, hide_index=True, width="stretch",
+                         column_config={"Capacity (t)": st.column_config.NumberColumn(format="%.1f")})
+            ia, ib = st.columns([2, 1])
+            mode = ia.radio("วิธีนำเข้า", ["แทนที่ตารางทั้งหมด", "อัปเดตเบอร์ที่ชื่อตรงกัน + เพิ่มเบอร์ใหม่"],
+                            horizontal=True, key="fd_sched_mode")
+            ib.button("ใช้ตารางนี้", type="primary", width="stretch", on_click=apply_schedule,
+                      args=(imp, mode.startswith("แทนที่")))
+        else:
+            st.info("ไฟล์นี้ไม่มีตัวเลขที่อ่านได้ — ดูรูปข้างตารางด้านล่าง แล้วพิมพ์ค่าลงในตารางเบอร์ฐานราก "
+                    "(หรือดาวน์โหลด “แบบฟอร์มตารางฐานราก” ที่แถบซ้าย กรอกใน Excel แล้วแนบกลับ)")
 t1, t2 = st.columns([1.35, 1])
 with t1:
     st.caption("ตารางเบอร์ฐานราก (แก้ได้ทุกช่อง / เพิ่มแถวได้) — ค่าเริ่มต้นเป็นค่าประมาณ ให้ตรวจกับแบบมาตรฐานฐานราก")
@@ -202,6 +250,16 @@ with t1:
                         })
     ss.fd_footings_live = ft
     footings = footings_from_table(ft)
+    bad = [str(r["Footing"]) for _, r in ft.iterrows()
+           if str(r["Footing"]).strip() and str(r["Footing"]) != "nan" and str(r["Footing"]) not in
+           {f.name for f in footings}]
+    if bad:
+        st.warning(f"ยังไม่ใช้ในการเลือก (ข้อมูลไม่ครบ): {', '.join(bad)}")
+    if sched_imgs:
+        with st.expander(f"🖼️ รูปข้อมูลฐานรากที่แนบ ({len(sched_imgs)} หน้า) — ใช้ดูขณะกรอกตาราง",
+                         expanded=imp is None):
+            pg = st.number_input("หน้า", 1, len(sched_imgs), 1, key="fd_sched_pg") if len(sched_imgs) > 1 else 1
+            st.image(sched_imgs[pg - 1], width="stretch")
 with t2:
     st.caption("FMAT: เลือกช่วง Grid X และ Grid Y — จุดที่อยู่ในกรอบจะรวมเป็น FMAT นั้น")
     zdf = st.data_editor(
